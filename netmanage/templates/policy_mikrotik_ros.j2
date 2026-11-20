@@ -1,0 +1,70 @@
+{% if route_maps %}
+/routing filter rule
+{% for r in route_maps %}
+{% for e in r.entries %}
+add chain={{ r.name }} rule="{{ e.ros_rule }}"
+{% endfor %}
+{% endfor %}
+{% endif %}
+{% if prefix_lists and not route_maps %}
+{{ warn("prefix-list tanpa route-map tidak dikonversi ke MikroTik (RouterOS memakai kondisi dst di /routing filter rule).") }}
+{% endif %}
+{% set acl_list = acls | rejectattr("qos_only") | list %}
+{% if acl_list %}
+/ip firewall filter
+{% for b in acl_bindings %}
+{% set side = "in-interface" if b.direction == "in" else "out-interface" %}
+{% for chain in (["forward", "input"] if b.direction == "in" else ["forward", "output"]) %}
+add chain={{ chain }} action=jump jump-target={{ b.acl_obj.safe }} {{ side }}={{ b.interface }} comment="NetManage: ACL {{ b.acl }} {{ b.direction }}"
+{% endfor %}
+{% endfor %}
+{% for a in acl_list %}
+{% set notes = namespace(text="") %}
+{% for e in a.entries %}
+{% if e.is_remark %}
+{% set notes.text = (notes.text ~ " | " if notes.text else "") ~ e.remark %}
+{% else %}
+add chain={{ a.safe }} action={{ "accept" if e.permit else "drop" }}{{ (" protocol=" ~ e.ros_proto) if not e.ip and not a.standard }}{{ (" src-address=" ~ e.src) if not e.src_any }}{{ (" dst-address=" ~ e.dst) if not e.dst_any and not a.standard }}{{ (" src-port=" ~ e.src_port_text) if e.src_op }}{{ (" dst-port=" ~ e.dst_port_text) if e.dst_op }}{{ " connection-state=established" if e.established }}{{ " log=yes" if e.log }}{{ (" comment=" ~ (notes.text | q)) if notes.text }}
+{% set notes.text = "" %}
+{% endif %}
+{% endfor %}
+add chain={{ a.safe }} action=drop comment="NetManage: implicit deny {{ a.name }}"
+{% endfor %}
+{% endif %}
+{% if qos_bindings %}
+/ip firewall mangle
+{% for b in qos_bindings %}
+{% set p = b.policy_obj %}
+{% set where = ("chain=prerouting in-interface=" if b.direction == "in" else "chain=postrouting out-interface=") ~ b.interface %}
+{% for a in p.actions %}
+{% set mark = p.name ~ "-" ~ a.cls %}
+{% set tag = "QOS " ~ p.name ~ " " ~ a.cls %}
+{% if a.default %}
+add {{ where }} packet-mark=no-mark action=mark-packet new-packet-mark={{ mark }} passthrough=yes comment="{{ tag }}"
+{% elif a["class"].dscp %}
+{% for d in a["class"].dscp %}
+add {{ where }} packet-mark=no-mark dscp={{ d }} action=mark-packet new-packet-mark={{ mark }} passthrough=yes comment="{{ tag }}"
+{% endfor %}
+{% elif a["class"].acl_obj %}
+{% for r in a["class"].acl_obj.rules %}
+add {{ where }} packet-mark=no-mark{{ (" protocol=" ~ r.ros_proto) if not r.ip }}{{ (" src-address=" ~ r.src) if not r.src_any }}{{ (" dst-address=" ~ r.dst) if not r.dst_any }}{{ (" src-port=" ~ r.src_port_text) if r.src_op }}{{ (" dst-port=" ~ r.dst_port_text) if r.dst_op }} action=mark-packet new-packet-mark={{ mark }} passthrough=yes comment="{{ tag }}"
+{% endfor %}
+{% else %}
+add {{ where }} packet-mark=no-mark action=mark-packet new-packet-mark={{ mark }} passthrough=yes comment="{{ tag }}"
+{% endif %}
+{% if a.set_dscp is not none %}
+add {{ where }} packet-mark={{ mark }} action=change-dscp new-dscp={{ a.set_dscp }} passthrough=yes comment="{{ tag }}"
+{% endif %}
+{% endfor %}
+{% endfor %}
+/queue tree
+{% for b in qos_bindings %}
+{% set p = b.policy_obj %}
+{% for a in p.actions if a.rate_kbps or a.bandwidth_kbps or a.priority_kbps or a.priority %}
+add name={{ p.name }}-{{ a.cls }}-{{ b.interface | replace("/", "_") }} parent={{ b.interface if b.direction == "out" else "global" }} packet-mark={{ p.name }}-{{ a.cls }}{{ (" max-limit=" ~ a.rate_kbps ~ "k") if a.rate_kbps }}{{ (" limit-at=" ~ (a.priority_kbps or a.bandwidth_kbps) ~ "k") if (a.priority_kbps or a.bandwidth_kbps) }} priority={{ 1 if a.priority else 8 }} comment="QOS {{ p.name }} {{ a.cls }}"
+{% if a.bandwidth_pct and not a.bandwidth_kbps %}
+{{ warn("QoS " ~ p.name ~ " class " ~ a.cls ~ ": bandwidth persen tidak dikonversi ke MikroTik (limit-at butuh nilai absolut).") }}
+{% endif %}
+{% endfor %}
+{% endfor %}
+{% endif %}

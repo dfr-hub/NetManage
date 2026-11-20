@@ -1,0 +1,176 @@
+{# ---------------------------------------------------------------- route policy #}
+{% for c in community_lists %}
+{% for e in c.entries %}
+{% if e.action == "permit" %}
+{% for v in e.members %}
+set policy-options community {{ c.name }}-{{ e.index // 10 }} members {{ v }}
+{% endfor %}
+{% else %}
+{{ warn("community-list " ~ c.name ~ ": entry deny " ~ e.value ~ " tidak dikonversi ke Junos.") }}
+{% endif %}
+{% endfor %}
+{% endfor %}
+{% for r in route_maps %}
+{% for e in r.entries %}
+{% set base = "set policy-options policy-statement " ~ r.name ~ " term T" ~ e.seq %}
+{% for p in e.prefixes %}
+{{ base }} from route-filter {{ p.prefix }} {{ p.junos }}{{ "" if p.permit else " next term" }}
+{% endfor %}
+{% for name in e.match_community %}
+{% for c in community_lists if c.name == name %}
+{% for ce in c.entries if ce.action == "permit" %}
+{{ base }} from community {{ c.name }}-{{ ce.index // 10 }}
+{% endfor %}
+{% endfor %}
+{% endfor %}
+{% if e.match_tag is not none %}
+{{ base }} from tag {{ e.match_tag }}
+{% endif %}
+{% if e.set_local_pref is not none %}
+{{ base }} then local-preference {{ e.set_local_pref }}
+{% endif %}
+{% if e.set_med is not none %}
+{{ base }} then metric {{ e.set_med }}
+{% endif %}
+{% if e.set_community %}
+{% for v in e.set_community %}
+set policy-options community {{ r.name }}-T{{ e.seq }}-SET members {{ v }}
+{% endfor %}
+{{ base }} then community {{ "add" if e.community_additive else "set" }} {{ r.name }}-T{{ e.seq }}-SET
+{% endif %}
+{% if e.set_next_hop %}
+{{ base }} then next-hop {{ e.set_next_hop }}
+{% endif %}
+{% if e.set_prepend %}
+{{ base }} then as-path-prepend "{{ e.set_prepend | join(" ") }}"
+{% endif %}
+{% if e.set_tag is not none %}
+{{ base }} then tag {{ e.set_tag }}
+{% endif %}
+{% if e.set_weight is not none %}
+{{ warn("route-map " ~ r.name ~ " " ~ e.seq ~ ": set weight tidak ada di Junos (pakai local-preference).") }}
+{% endif %}
+{{ base }} then {{ "accept" if e.permit else "reject" }}
+{% endfor %}
+set policy-options policy-statement {{ r.name }} term IMPLICIT-DENY then reject
+{% endfor %}
+{% if prefix_lists and not route_maps %}
+{{ warn("prefix-list tanpa route-map tidak dikonversi ke Junos (Junos memakai route-filter di policy-statement).") }}
+{% endif %}
+{# ----------------------------------------------------------------------- ACL #}
+{% for a in acls if not a.qos_only %}
+{% if a.remarks %}
+{{ warn("ACL " ~ a.name ~ ": remark tidak dikonversi (Junos firewall filter tidak punya remark).") }}
+{% endif %}
+{% for e in a.rules %}
+{% set b = "set firewall family inet filter " ~ a.name ~ " term T" ~ e.seq %}
+{% if not e.src_any %}
+{{ b }} from source-address {{ e.src }}
+{% endif %}
+{% if not e.dst_any and not a.standard %}
+{{ b }} from destination-address {{ e.dst }}
+{% endif %}
+{% if not e.ip and not a.standard %}
+{{ b }} from protocol {{ e.proto_name }}
+{% endif %}
+{% for p in (e.src_ports if e.src_op == "eq" else ([e.src_port_text] if e.src_op else [])) %}
+{{ b }} from source-port {{ p }}
+{% endfor %}
+{% for p in (e.dst_ports if e.dst_op == "eq" else ([e.dst_port_text] if e.dst_op else [])) %}
+{{ b }} from destination-port {{ p }}
+{% endfor %}
+{% if e.established %}
+{{ b }} from tcp-established
+{% endif %}
+{% if e.log %}
+{{ b }} then syslog
+{% endif %}
+{{ b }} then {{ "accept" if e.permit else "discard" }}
+{% endfor %}
+{% endfor %}
+{# ----------------------------------------------------------------------- QoS #}
+{% set fc_count = namespace(n=0) %}
+{% for p in qos_policies %}
+{% set f = "set firewall family inet filter QOS-" ~ p.name %}
+{% for a in p.actions %}
+{% set fc = "FC-" ~ a.safe %}
+{% set queued = a.priority or a.bandwidth_kbps or a.bandwidth_pct or a.shape_kbps %}
+{% set terms = [] %}
+{% if a.default %}
+{% set _ = terms.append({"name": "class-default", "rule": none}) %}
+{% elif a["class"].dscp or a["class"].any or not a["class"].acl_obj %}
+{% set _ = terms.append({"name": a.cls, "rule": none}) %}
+{% else %}
+{% for r in a["class"].acl_obj.rules %}
+{% set _ = terms.append({"name": a.cls ~ "-" ~ r.seq, "rule": r}) %}
+{% endfor %}
+{% endif %}
+{% for t in terms %}
+{% set b = f ~ " term " ~ t.name %}
+{% if not a.default %}
+{% for d in a["class"].dscp %}
+{{ b }} from dscp {{ d | junos_dscp }}
+{% endfor %}
+{% if t.rule %}
+{% set e = t.rule %}
+{% if not e.src_any %}
+{{ b }} from source-address {{ e.src }}
+{% endif %}
+{% if not e.dst_any %}
+{{ b }} from destination-address {{ e.dst }}
+{% endif %}
+{% if not e.ip %}
+{{ b }} from protocol {{ e.proto_name }}
+{% endif %}
+{% for x in (e.src_ports if e.src_op == "eq" else ([e.src_port_text] if e.src_op else [])) %}
+{{ b }} from source-port {{ x }}
+{% endfor %}
+{% for x in (e.dst_ports if e.dst_op == "eq" else ([e.dst_port_text] if e.dst_op else [])) %}
+{{ b }} from destination-port {{ x }}
+{% endfor %}
+{% endif %}
+{% endif %}
+{% if a.police_kbps %}
+{{ b }} then policer P-{{ a.safe }}
+{% endif %}
+{% if a.set_dscp is not none %}
+{{ b }} then dscp {{ a.set_dscp | junos_dscp }}
+{% endif %}
+{% if queued %}
+{{ b }} then forwarding-class {{ fc }}
+{% endif %}
+{{ b }} then accept
+{% endfor %}
+{% if a.police_kbps %}
+set firewall policer P-{{ a.safe }} if-exceeding bandwidth-limit {{ a.police }} burst-size-limit {{ a.burst_kb }}k
+set firewall policer P-{{ a.safe }} then discard
+{% endif %}
+{% if queued %}
+{% set fc_count.n = fc_count.n + 1 %}
+set class-of-service forwarding-classes class {{ fc }} queue-num {{ fc_count.n % 8 }}
+{% if a.priority %}
+set class-of-service schedulers S-{{ a.safe }} priority strict-high
+{% endif %}
+{% if a.priority_kbps or a.bandwidth_kbps %}
+set class-of-service schedulers S-{{ a.safe }} transmit-rate {{ (a.priority_kbps or a.bandwidth_kbps) }}k
+{% elif a.bandwidth_pct %}
+set class-of-service schedulers S-{{ a.safe }} transmit-rate percent {{ a.bandwidth_pct }}
+{% endif %}
+{% if a.shape_kbps %}
+set class-of-service schedulers S-{{ a.safe }} shaping-rate {{ a.shape }}
+{% endif %}
+set class-of-service scheduler-maps SM-{{ p.name }} forwarding-class {{ fc }} scheduler S-{{ a.safe }}
+{% endif %}
+{% endfor %}
+{% if not p.default %}
+{{ f }} term class-default then accept
+{% endif %}
+{% endfor %}
+{% if fc_count.n > 7 %}
+{{ warn("QoS: lebih dari 7 forwarding-class dibuat, melebihi jumlah queue umum Junos. Gabungkan class manual.") }}
+{% endif %}
+{% for b in qos_bindings if b.direction == "out" %}
+{% if b.policy_obj.actions | selectattr("priority") | list or b.policy_obj.actions | selectattr("bandwidth_kbps") | list or b.policy_obj.actions | selectattr("bandwidth_pct") | list or b.policy_obj.actions | selectattr("shape_kbps") | list %}
+set class-of-service interfaces {{ b.interface.split(".")[0] }} scheduler-map SM-{{ b.policy }}
+{% endif %}
+{% endfor %}

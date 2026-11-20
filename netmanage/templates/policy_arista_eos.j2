@@ -1,0 +1,91 @@
+{% for p in prefix_lists %}
+{% for e in p.entries %}
+ip prefix-list {{ p.name }} seq {{ e.seq }} {{ e.action }} {{ e.prefix }}{{ e.ios }}
+{% endfor %}
+{% endfor %}
+{% for c in community_lists %}
+{% for e in c.entries %}
+ip community-list {{ c.name }} {{ e.action }} {{ e.value }}
+{% endfor %}
+{% endfor %}
+{% if prefix_lists or community_lists %}
+!
+{% endif %}
+{% for r in route_maps %}
+{% for e in r.entries %}
+route-map {{ r.name }} {{ e.action }} {{ e.seq }}
+{% if e.match_prefix %}
+{% if e.match_prefix | length > 1 %}
+{{ warn("route-map " ~ r.name ~ " " ~ e.seq ~ ": EOS hanya menerima satu prefix-list per entry, dipakai " ~ e.match_prefix[0] ~ ".") }}
+{% endif %}
+   match ip address prefix-list {{ e.match_prefix[0] }}
+{% endif %}
+{% if e.match_community %}
+   match community {{ e.match_community | join(" ") }}
+{% endif %}
+{% if e.match_tag is not none %}
+   match tag {{ e.match_tag }}
+{% endif %}
+{% if e.set_local_pref is not none %}
+   set local-preference {{ e.set_local_pref }}
+{% endif %}
+{% if e.set_med is not none %}
+   set metric {{ e.set_med }}
+{% endif %}
+{% if e.set_community %}
+   set community {{ e.set_community | join(" ") }}{{ " additive" if e.community_additive }}
+{% endif %}
+{% if e.set_next_hop %}
+   set ip next-hop {{ e.set_next_hop }}
+{% endif %}
+{% if e.set_prepend %}
+   set as-path prepend {{ e.set_prepend | join(" ") }}
+{% endif %}
+{% if e.set_weight is not none %}
+   set weight {{ e.set_weight }}
+{% endif %}
+{% if e.set_tag is not none %}
+   set tag {{ e.set_tag }}
+{% endif %}
+!
+{% endfor %}
+{% endfor %}
+{% for a in acls %}
+ip access-list {{ "standard " if a.standard }}{{ a.name }}
+{% for e in a.entries %}
+{% if e.is_remark %}
+   remark {{ e.remark }}
+{% elif a.standard %}
+   {{ e.seq }} {{ e.action }} {{ e.src | eos_addr }}{{ " log" if e.log }}
+{% else %}
+   {{ e.seq }} {{ e.action }} {{ e.proto_name }} {{ e.src | eos_addr }}{{ ios_ports(e.src_op, e.src_ports) }} {{ e.dst | eos_addr }}{{ ios_ports(e.dst_op, e.dst_ports) }}{{ " established" if e.established }}{{ " log" if e.log }}
+{% endif %}
+{% endfor %}
+!
+{% endfor %}
+{% for c in qos_classes.values() %}
+class-map type qos match-any {{ c.name }}
+{% if c.dscp %}
+   match dscp {{ c.dscp | join(" ") }}
+{% endif %}
+{% if c.acl %}
+   match ip access-group {{ c.acl }}
+{% endif %}
+!
+{% endfor %}
+{% for p in qos_policies %}
+policy-map type quality-of-service {{ p.name }}
+{% for a in p.actions %}
+   class {{ "class-default" if a.default else a.cls }}
+{% if a.set_dscp is not none %}
+      set dscp {{ a.set_dscp }}
+{% endif %}
+{% if a.police_kbps %}
+      police rate {{ a.police_kbps }} kbps burst-size {{ a.burst_kb }} kbytes
+{% endif %}
+{% if a.priority or a.bandwidth_kbps or a.bandwidth_pct or a.shape_kbps %}
+{{ warn("QoS " ~ p.name ~ " class " ~ a.cls ~ ": priority/bandwidth/shape di EOS diatur lewat tx-queue per interface, buat manual.") }}
+{% endif %}
+{% endfor %}
+!
+{% endfor %}

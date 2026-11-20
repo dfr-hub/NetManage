@@ -1,0 +1,181 @@
+{% if part == "route" %}
+{% if prefix_lists %}
+config router prefix-list
+{% for p in prefix_lists %}
+    edit {{ p.name | q }}
+        config rule
+{% for e in p.entries %}
+            edit {{ e.seq }}
+                set action {{ e.action }}
+                set prefix {{ e.net }} {{ e.mask }}
+{% if e.frr_ge is not none %}
+                set ge {{ e.frr_ge }}
+{% endif %}
+{% if e.frr_le is not none %}
+                set le {{ e.frr_le }}
+{% endif %}
+            next
+{% endfor %}
+        end
+    next
+{% endfor %}
+end
+{% endif %}
+{% if community_lists %}
+config router community-list
+{% for c in community_lists %}
+    edit {{ c.name | q }}
+        set type standard
+        config rule
+{% for e in c.entries %}
+            edit {{ loop.index }}
+                set action {{ e.action }}
+                set match {{ e.value | q }}
+            next
+{% endfor %}
+        end
+    next
+{% endfor %}
+end
+{% endif %}
+{% if route_maps %}
+config router route-map
+{% for r in route_maps %}
+    edit {{ r.name | q }}
+        config rule
+{% for e in r.entries %}
+            edit {{ e.seq }}
+                set action {{ e.action }}
+{% if e.match_prefix %}
+{% if e.match_prefix | length > 1 %}
+{{ warn("route-map " ~ r.name ~ " " ~ e.seq ~ ": FortiOS hanya satu match-ip-address per rule, dipakai " ~ e.match_prefix[0] ~ ".") }}
+{% endif %}
+                set match-ip-address {{ e.match_prefix[0] | q }}
+{% endif %}
+{% if e.match_community %}
+                set match-community {{ e.match_community[0] | q }}
+{% endif %}
+{% if e.match_tag is not none %}
+                set match-tag {{ e.match_tag }}
+{% endif %}
+{% if e.set_local_pref is not none %}
+                set set-local-preference {{ e.set_local_pref }}
+{% endif %}
+{% if e.set_med is not none %}
+                set set-metric {{ e.set_med }}
+{% endif %}
+{% if e.set_community %}
+                set set-community{% for v in e.set_community %} {{ v | q }}{% endfor %}
+
+{% if e.community_additive %}
+                set set-community-additive enable
+{% endif %}
+{% endif %}
+{% if e.set_next_hop %}
+                set set-ip-nexthop {{ e.set_next_hop }}
+{% endif %}
+{% if e.set_prepend %}
+                set set-aspath{% for v in e.set_prepend %} {{ v | q }}{% endfor %}
+
+{% endif %}
+{% if e.set_weight is not none %}
+                set set-weight {{ e.set_weight }}
+{% endif %}
+{% if e.set_tag is not none %}
+                set set-tag {{ e.set_tag }}
+{% endif %}
+            next
+{% endfor %}
+        end
+    next
+{% endfor %}
+end
+{% endif %}
+{% else %}
+{% if fgt.addresses %}
+config firewall address
+{% for name, subnet in fgt.addresses.items() %}
+    edit {{ name | q }}
+        set subnet {{ subnet }}
+    next
+{% endfor %}
+end
+{% endif %}
+{% if fgt.services %}
+config firewall service custom
+{% for name, s in fgt.services.items() %}
+    edit {{ name | q }}
+        set protocol {{ s.protocol }}
+{% if s.protocol == "IP" %}
+        set protocol-number {{ s.number }}
+{% else %}
+        set {{ s.key }} {{ s.range }}
+{% endif %}
+    next
+{% endfor %}
+end
+{% endif %}
+{% if fgt.policies %}
+config firewall policy
+{% for p in fgt.policies %}
+    edit {{ 1000 + p.id }}
+        set name {{ p.name | q }}
+        set srcintf {{ p.srcintf | q }}
+        set dstintf {{ p.dstintf | q }}
+        set srcaddr {{ p.srcaddr | q }}
+        set dstaddr {{ p.dstaddr | q }}
+        set action {{ p.action }}
+        set schedule "always"
+        set service {{ p.service | q }}
+{% if p.log %}
+        set logtraffic all
+{% endif %}
+{% if p.disabled %}
+        set status disable
+{% endif %}
+        set comments {{ p.comment | q }}
+    next
+{% endfor %}
+end
+{% if fgt.policies | selectattr("disabled") | list %}
+{{ warn("ACL tanpa interface dibuat sebagai firewall policy berstatus disable (srcintf/dstintf any). Aktifkan dan sesuaikan manual.") }}
+{% endif %}
+{% endif %}
+{% if fgt.shapers %}
+config firewall shaper traffic-shaper
+{% for s in fgt.shapers %}
+    edit {{ s.name | q }}
+        set bandwidth-unit kbps
+{% if s.max %}
+        set maximum-bandwidth {{ s.max }}
+{% endif %}
+{% if s.guaranteed %}
+        set guaranteed-bandwidth {{ s.guaranteed }}
+{% endif %}
+        set priority {{ s.priority }}
+{% if s.dscp %}
+        set diffserv enable
+        set diffservcode {{ s.dscp }}
+{% endif %}
+    next
+{% endfor %}
+end
+config firewall shaping-policy
+{% for p in fgt.shaping %}
+    edit {{ p.id }}
+        set comment {{ p.comment | q }}
+        set service {{ p.service | q }}
+        set srcintf {{ p.srcintf | q }}
+        set dstintf {{ p.dstintf | q }}
+        set srcaddr {{ p.srcaddr | q }}
+        set dstaddr {{ p.dstaddr | q }}
+{% if p.tos %}
+        set tos {{ p.tos }}
+        set tos-mask 0xfc
+{% endif %}
+        set traffic-shaper {{ p.shaper | q }}
+    next
+{% endfor %}
+end
+{% endif %}
+{% endif %}

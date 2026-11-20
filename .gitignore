@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# PyInstaller build output (the EXE is published as a GitHub Release asset)
+build/
+build_new/
+dist/
+dist_new/
+
+# runtime files written next to the app
+output/
+settings.json
+commands.json
+
+# editor / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

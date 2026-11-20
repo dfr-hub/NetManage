@@ -1,0 +1,8 @@
+netmiko>=4.4
+jinja2>=3.1
+tkinterdnd2>=0.4
+sv-ttk>=2.6
+pybatfish>=2025.7
+pyinstaller>=6.10
+# build/test only (tools/make_assets.py, tests/screenshots.py), not bundled in the EXE
+pillow>=10

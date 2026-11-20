@@ -1,0 +1,151 @@
+{% if part == "filter" %}
+{% if qos_policies %}
+{{ warn("QoS (" ~ (qos_policies | map(attribute="name") | join(", ")) ~ ") tidak dikonversi ke Nokia SR OS. SR OS memakai sap-ingress/sap-egress dan network qos policy, buat manual.") }}
+{% endif %}
+{% set acl_list = acls | rejectattr("qos_only") | list %}
+{% if acl_list %}
+    filter
+{% for a in acl_list %}
+        ip-filter {{ a.id }} name "{{ a.name }}" create
+            description "{{ a.name }}"
+            default-action drop
+{% for e in a.split %}
+            entry {{ e.seq }} create
+{% if e.note %}
+                description "{{ e.note | replace('"', "'") }}"
+{% endif %}
+                match{{ (" protocol " ~ (e.proto_name if e.proto_name in ("tcp", "udp", "icmp") else e.proto_num)) if not e.ip and not a.standard }}
+{% if not e.src_any %}
+                    src-ip {{ e.src }}
+{% endif %}
+{% if not e.dst_any and not a.standard %}
+                    dst-ip {{ e.dst }}
+{% endif %}
+{% if e.src_op %}
+                    src-port {{ "eq " ~ e.src_ports[0] if e.src_op == "eq" else "range " ~ e.src_ports[0] ~ " " ~ e.src_ports[1] }}
+{% endif %}
+{% if e.dst_op %}
+                    dst-port {{ "eq " ~ e.dst_ports[0] if e.dst_op == "eq" else "range " ~ e.dst_ports[0] ~ " " ~ e.dst_ports[1] }}
+{% endif %}
+{% if e.established %}
+                    tcp-ack true
+{% endif %}
+                exit
+{% if e.log %}
+                log 101
+{% endif %}
+                action {{ "forward" if e.permit else "drop" }}
+            exit
+{% endfor %}
+        exit
+{% endfor %}
+    exit
+{% endif %}
+{% elif part == "route" %}
+{% if route_maps %}
+        policy-options
+            begin
+{% for r in route_maps %}
+{% for e in r.entries %}
+{% if e.permits %}
+            prefix-list "{{ r.name }}-{{ e.seq }}"
+{% for p in e.permits %}
+                prefix {{ p.prefix }} {{ p.nokia }}
+{% endfor %}
+            exit
+{% endif %}
+{% if e.denies %}
+            prefix-list "{{ r.name }}-{{ e.seq }}-DENY"
+{% for p in e.denies %}
+                prefix {{ p.prefix }} {{ p.nokia }}
+{% endfor %}
+            exit
+{% endif %}
+{% if e.set_community %}
+            community "{{ r.name }}-{{ e.seq }}-SET" members{% for v in e.set_community %} "{{ v }}"{% endfor %}
+
+{% endif %}
+{% endfor %}
+{% endfor %}
+{% for c in community_lists %}
+{% for e in c.entries if e.action == "permit" %}
+            community "{{ c.name }}-{{ e.index // 10 }}" members{% for v in e.members %} "{{ v }}"{% endfor %}
+
+{% endfor %}
+{% endfor %}
+{% for r in route_maps %}
+            policy-statement "{{ r.name }}"
+{% for e in r.entries %}
+{% if e.denies %}
+                entry {{ e.seq * 10 - 5 }}
+                    from
+                        prefix-list "{{ r.name }}-{{ e.seq }}-DENY"
+                    exit
+                    action next-entry
+                exit
+{% endif %}
+{% set comms = [] %}
+{% for name in e.match_community %}
+{% for c in community_lists if c.name == name %}
+{% for ce in c.entries if ce.action == "permit" %}
+{% set _ = comms.append(c.name ~ "-" ~ (ce.index // 10)) %}
+{% endfor %}
+{% endfor %}
+{% endfor %}
+{% for comm in (comms or [none]) %}
+                entry {{ e.seq * 10 + loop.index0 }}
+{% if e.permits or comm or e.match_tag is not none or (e.prefixes and not e.permits) %}
+                    from
+{% if e.permits %}
+                        prefix-list "{{ r.name }}-{{ e.seq }}"
+{% elif e.prefixes %}
+                        prefix-list "{{ r.name }}-{{ e.seq }}-DENY"
+{% endif %}
+{% if comm %}
+                        community "{{ comm }}"
+{% endif %}
+{% if e.match_tag is not none %}
+                        tag {{ e.match_tag }}
+{% endif %}
+                    exit
+{% endif %}
+{% if e.permit %}
+                    action accept
+{% if e.set_local_pref is not none %}
+                        local-preference {{ e.set_local_pref }}
+{% endif %}
+{% if e.set_med is not none %}
+                        metric set {{ e.set_med }}
+{% endif %}
+{% if e.set_community %}
+                        community {{ "add" if e.community_additive else "replace" }} "{{ r.name }}-{{ e.seq }}-SET"
+{% endif %}
+{% if e.set_next_hop %}
+                        next-hop {{ e.set_next_hop }}
+{% endif %}
+{% if e.set_prepend %}
+{% if e.set_prepend | unique | list | length > 1 %}
+{{ warn("route-map " ~ r.name ~ " " ~ e.seq ~ ": SR OS as-path-prepend hanya satu AS berulang, dipakai " ~ e.set_prepend[0] ~ ".") }}
+{% endif %}
+                        as-path-prepend {{ e.set_prepend[0] }} {{ e.set_prepend | length }}
+{% endif %}
+{% if e.set_tag is not none %}
+                        tag {{ e.set_tag }}
+{% endif %}
+                    exit
+{% else %}
+                    action reject
+{% endif %}
+                exit
+{% endfor %}
+{% if e.set_weight is not none %}
+{{ warn("route-map " ~ r.name ~ " " ~ e.seq ~ ": set weight tidak ada di SR OS.") }}
+{% endif %}
+{% endfor %}
+                default-action reject
+            exit
+{% endfor %}
+            commit
+        exit
+{% endif %}
+{% endif %}

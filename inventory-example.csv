@@ -1,0 +1,11 @@
+host,ip,vendor,port,protocol,username,password
+R1-CISCO,192.0.2.1,cisco_ios,22,ssh,,
+R2-JUNIPER,192.0.2.2,juniper_junos,22,ssh,,
+R3-MIKROTIK,192.0.2.3,mikrotik_ros,22,ssh,,
+R4-HUAWEI,192.0.2.4,huawei_vrp,22,ssh,,
+R5-FORTINET,192.0.2.5,fortinet_fortios,22,ssh,,
+R6-ARISTA,192.0.2.6,arista_eos,22,ssh,,
+R7-H3C,192.0.2.7,h3c_comware,22,ssh,,
+R8-NOKIA,192.0.2.8,nokia_sros,22,ssh,,
+R9-VYOS,192.0.2.9,vyos,22,ssh,,
+R10-ARUBA,192.0.2.10,aruba_aoscx,22,ssh,,

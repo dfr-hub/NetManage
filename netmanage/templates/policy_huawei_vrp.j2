@@ -1,0 +1,120 @@
+{% set h3c = dst_vendor == "h3c_comware" %}
+{% for p in prefix_lists %}
+{% for e in p.entries %}
+ip {{ "prefix-list" if h3c else "ip-prefix" }} {{ p.name }} index {{ e.seq }} {{ e.action }} {{ e.net }} {{ e.plen }}{{ e.vrp }}
+{% endfor %}
+{% endfor %}
+{% for c in community_lists %}
+{% for e in c.entries %}
+{% if h3c %}
+ip community-list basic {{ c.name }} {{ e.action }} {{ e.value }}
+{% else %}
+ip community-filter basic {{ c.name }} index {{ e.index }} {{ e.action }} {{ e.value }}
+{% endif %}
+{% endfor %}
+{% endfor %}
+{% if prefix_lists or community_lists %}
+#
+{% endif %}
+{% for r in route_maps %}
+{% for e in r.entries %}
+route-policy {{ r.name }} {{ e.action }} node {{ e.seq }}
+{% if e.match_prefix | length > 1 %}
+{{ warn("route-policy " ~ r.name ~ " node " ~ e.seq ~ ": hanya satu ip-prefix per node, dipakai " ~ e.match_prefix[0] ~ ".") }}
+{% endif %}
+{% if e.match_prefix %}
+ if-match {{ "ip address prefix-list" if h3c else "ip-prefix" }} {{ e.match_prefix[0] }}
+{% endif %}
+{% for c in e.match_community %}
+ if-match {{ "community" if h3c else "community-filter" }} {{ c }}
+{% endfor %}
+{% if e.match_tag is not none %}
+ if-match tag {{ e.match_tag }}
+{% endif %}
+{% if e.set_local_pref is not none %}
+ apply local-preference {{ e.set_local_pref }}
+{% endif %}
+{% if e.set_med is not none %}
+ apply cost {{ e.set_med }}
+{% endif %}
+{% if e.set_community %}
+ apply community {{ e.set_community | join(" ") }}{{ " additive" if e.community_additive }}
+{% endif %}
+{% if e.set_next_hop %}
+ apply ip-address next-hop {{ e.set_next_hop }}
+{% endif %}
+{% if e.set_prepend %}
+ apply as-path {{ e.set_prepend | join(" ") }}{{ "" if h3c else " additive" }}
+{% endif %}
+{% if e.set_weight is not none %}
+ apply preferred-value {{ e.set_weight }}
+{% endif %}
+{% if e.set_tag is not none %}
+ apply tag {{ e.set_tag }}
+{% endif %}
+#
+{% endfor %}
+{% endfor %}
+{% for a in acls %}
+{% if h3c %}
+acl {{ "basic" if a.standard else "advanced" }} {{ a.name if a.numeric else "name " ~ a.name }}
+{% elif a.numeric %}
+acl number {{ a.name }}
+{% else %}
+acl name {{ a.name }} {{ "basic" if a.standard else "advance" }}
+{% endif %}
+{% for e in a.split %}
+ rule {{ e.seq }} {{ e.action }}{{ (" " ~ e.proto_name) if not a.standard }}{{ (" source " ~ (e.src | vrp_addr)) if not e.src_any }}{{ ios_ports(e.src_op, e.src_ports) | replace(" eq ", " source-port eq ") | replace(" range ", " source-port range ") if e.src_op }}{{ (" destination " ~ (e.dst | vrp_addr)) if not e.dst_any and not a.standard }}{{ ios_ports(e.dst_op, e.dst_ports) | replace(" eq ", " destination-port eq ") | replace(" range ", " destination-port range ") if e.dst_op }}{{ (" established" if h3c else " tcp-flag established") if e.established }}{{ " logging" if e.log }}
+{% if e.note %}
+ rule {{ e.seq }} {{ "comment" if h3c else "description" }} {{ e.note }}
+{% endif %}
+{% endfor %}
+#
+{% endfor %}
+{% for c in qos_classes.values() %}
+traffic classifier {{ c.name }} operator {{ "or" if c.match_any else "and" }}
+{% if c.any %}
+ if-match any
+{% endif %}
+{% if c.dscp %}
+ if-match dscp {{ c.dscp | join(" ") }}
+{% endif %}
+{% if c.acl %}
+ if-match acl {{ c.acl if c.acl.isdigit() else "name " ~ c.acl }}
+{% endif %}
+#
+{% endfor %}
+{% for p in qos_policies %}
+{% for a in p.actions %}
+traffic behavior {{ a.safe }}
+{% if a.set_dscp is not none %}
+ remark dscp {{ a.set_dscp }}
+{% endif %}
+{% if a.police_kbps %}
+ car cir {{ a.police_kbps }}
+{% endif %}
+{% if a.shape_kbps %}
+ gts cir {{ a.shape_kbps }}
+{% endif %}
+{% if a.priority %}
+{% if a.priority_kbps %}
+ queue ef bandwidth {{ a.priority_kbps }}
+{% elif a.bandwidth_pct %}
+ queue ef bandwidth pct {{ a.bandwidth_pct }}
+{% else %}
+ queue ef bandwidth pct 30
+{{ warn("QoS " ~ p.name ~ " class " ~ a.cls ~ ": priority tanpa rate, dipakai queue ef bandwidth pct 30. Sesuaikan.") }}
+{% endif %}
+{% elif a.bandwidth_kbps %}
+ queue af bandwidth {{ a.bandwidth_kbps }}
+{% elif a.bandwidth_pct %}
+ queue af bandwidth pct {{ a.bandwidth_pct }}
+{% endif %}
+#
+{% endfor %}
+{{ "qos" if h3c else "traffic" }} policy {{ p.name }}
+{% for a in p.actions %}
+ classifier {{ "default-class" if a.default else a.cls }} behavior {{ a.safe }}
+{% endfor %}
+#
+{% endfor %}

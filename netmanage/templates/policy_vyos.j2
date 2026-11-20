@@ -1,0 +1,208 @@
+{# ---------------------------------------------------------------- route policy #}
+{% for p in prefix_lists %}
+{% for e in p.entries %}
+set policy prefix-list {{ p.name }} rule {{ e.seq }} action '{{ e.action }}'
+set policy prefix-list {{ p.name }} rule {{ e.seq }} prefix '{{ e.prefix }}'
+{% if e.frr_ge is not none %}
+set policy prefix-list {{ p.name }} rule {{ e.seq }} ge '{{ e.frr_ge }}'
+{% endif %}
+{% if e.frr_le is not none %}
+set policy prefix-list {{ p.name }} rule {{ e.seq }} le '{{ e.frr_le }}'
+{% endif %}
+{% endfor %}
+{% endfor %}
+{% for c in community_lists %}
+{% for e in c.entries %}
+set policy community-list {{ c.name }} rule {{ e.index }} action '{{ e.action }}'
+set policy community-list {{ c.name }} rule {{ e.index }} regex '{{ e.value | replace(" ", "_") }}'
+{% endfor %}
+{% endfor %}
+{% for r in route_maps %}
+{% for e in r.entries %}
+{% set b = "set policy route-map " ~ r.name ~ " rule " ~ e.seq %}
+{{ b }} action '{{ e.action }}'
+{% if e.match_prefix %}
+{% if e.match_prefix | length > 1 %}
+{{ warn("route-map " ~ r.name ~ " " ~ e.seq ~ ": VyOS hanya menerima satu prefix-list per rule, dipakai " ~ e.match_prefix[0] ~ ".") }}
+{% endif %}
+{{ b }} match ip address prefix-list '{{ e.match_prefix[0] }}'
+{% endif %}
+{% if e.match_community %}
+{{ b }} match community community-list '{{ e.match_community[0] }}'
+{% endif %}
+{% if e.match_tag is not none %}
+{{ b }} match tag '{{ e.match_tag }}'
+{% endif %}
+{% if e.set_local_pref is not none %}
+{{ b }} set local-preference '{{ e.set_local_pref }}'
+{% endif %}
+{% if e.set_med is not none %}
+{{ b }} set metric '{{ e.set_med }}'
+{% endif %}
+{% for v in e.set_community %}
+{{ b }} set community {{ "add" if e.community_additive else "replace" }} '{{ v }}'
+{% endfor %}
+{% if e.set_next_hop %}
+{{ b }} set ip-next-hop '{{ e.set_next_hop }}'
+{% endif %}
+{% if e.set_prepend %}
+{{ b }} set as-path prepend '{{ e.set_prepend | join(" ") }}'
+{% endif %}
+{% if e.set_weight is not none %}
+{{ b }} set weight '{{ e.set_weight }}'
+{% endif %}
+{% if e.set_tag is not none %}
+{{ b }} set tag '{{ e.set_tag }}'
+{% endif %}
+{% endfor %}
+{% endfor %}
+{# ----------------------------------------------------------------------- ACL #}
+{% for a in acls if not a.qos_only %}
+{% set fw = "set firewall ipv4 name " ~ a.name %}
+{{ fw }} default-action 'drop'
+{% for e in a.rules %}
+{% set b = fw ~ " rule " ~ e.seq %}
+{{ b }} action '{{ "accept" if e.permit else "drop" }}'
+{% if not e.ip and not a.standard %}
+{{ b }} protocol '{{ e.proto_name }}'
+{% endif %}
+{% if not e.src_any %}
+{{ b }} source address '{{ e.src }}'
+{% endif %}
+{% if e.src_op %}
+{{ b }} source port '{{ e.src_port_text }}'
+{% endif %}
+{% if not e.dst_any and not a.standard %}
+{{ b }} destination address '{{ e.dst }}'
+{% endif %}
+{% if e.dst_op %}
+{{ b }} destination port '{{ e.dst_port_text }}'
+{% endif %}
+{% if e.established %}
+{{ b }} state 'established'
+{% endif %}
+{% if e.log %}
+{{ b }} log
+{% endif %}
+{% for s in a.split if s.seq == e.seq and s.note %}
+{{ b }} description '{{ s.note | replace("'", "") }}'
+{% endfor %}
+{% endfor %}
+{% endfor %}
+{% for b in acl_bindings %}
+{% set n = 1000 + loop.index * 10 %}
+{% for chain in (["forward", "input"] if b.direction == "in" else ["forward", "output"]) %}
+{% set r = "set firewall ipv4 " ~ chain ~ " filter rule " ~ n %}
+{{ r }} action 'jump'
+{{ r }} jump-target '{{ b.acl }}'
+{{ r }} {{ "inbound" if b.direction == "in" else "outbound" }}-interface name '{{ b.interface }}'
+{% endfor %}
+{% endfor %}
+{# ----------------------------------------------------------------------- QoS #}
+{% for p in qos_policies %}
+{% set dirs = qos_bindings | selectattr("policy", "equalto", p.name) | map(attribute="direction") | list %}
+{% if "out" in dirs or not dirs %}
+{% set q = "set qos policy shaper " ~ p.name %}
+{{ q }} bandwidth 'auto'
+{% for a in p.classes %}
+{% set c = q ~ " class " ~ loop.index * 10 %}
+{{ c }} description '{{ a.cls }}'
+{% for d in a["class"].dscp %}
+{{ c }} match {{ a.cls }}-D{{ d }} ip dscp '{{ d }}'
+{% endfor %}
+{% if a["class"].acl_obj and not a["class"].dscp %}
+{% for r in a["class"].acl_obj.split %}
+{% set m = c ~ " match " ~ a.cls ~ "-" ~ r.seq %}
+{% if not r.ip %}
+{{ m }} ip protocol '{{ r.proto_name }}'
+{% endif %}
+{% if not r.src_any %}
+{{ m }} ip source address '{{ r.src }}'
+{% endif %}
+{% if not r.dst_any %}
+{{ m }} ip destination address '{{ r.dst }}'
+{% endif %}
+{% if r.src_op %}
+{{ m }} ip source port '{{ r.src_port_text }}'
+{% endif %}
+{% if r.dst_op %}
+{{ m }} ip destination port '{{ r.dst_port_text }}'
+{% endif %}
+{% endfor %}
+{% endif %}
+{% if a.priority_kbps or a.bandwidth_kbps %}
+{{ c }} bandwidth '{{ a.priority_kbps or a.bandwidth_kbps }}kbit'
+{% elif a.bandwidth_pct %}
+{{ c }} bandwidth '{{ a.bandwidth_pct }}%'
+{% else %}
+{{ c }} bandwidth '1%'
+{% endif %}
+{% if a.rate_kbps %}
+{{ c }} ceiling '{{ a.rate_kbps }}kbit'
+{% endif %}
+{% if a.priority %}
+{{ c }} priority '7'
+{% endif %}
+{% if a.set_dscp is not none %}
+{{ c }} set-dscp '{{ a.set_dscp }}'
+{% endif %}
+{% endfor %}
+{% set d = p.default %}
+{{ q }} default description 'class-default'
+{% if d and (d.bandwidth_kbps or d.priority_kbps) %}
+{{ q }} default bandwidth '{{ d.bandwidth_kbps or d.priority_kbps }}kbit'
+{% elif d and d.bandwidth_pct %}
+{{ q }} default bandwidth '{{ d.bandwidth_pct }}%'
+{% else %}
+{{ q }} default bandwidth '50%'
+{% endif %}
+{% if d and d.rate_kbps %}
+{{ q }} default ceiling '{{ d.rate_kbps }}kbit'
+{% endif %}
+{% if d and d.priority %}
+{{ q }} default priority '7'
+{% endif %}
+{% if d and d.set_dscp is not none %}
+{{ q }} default set-dscp '{{ d.set_dscp }}'
+{% endif %}
+{% endif %}
+{% if "in" in dirs %}
+{% set q = "set qos policy limiter " ~ p.name ~ ("-IN" if "out" in dirs else "") %}
+{% for a in p.classes if a.rate_kbps or a.set_dscp is not none %}
+{% if a.set_dscp is not none %}
+{{ warn("QoS " ~ p.name ~ " class " ~ a.cls ~ ": set-dscp pada ingress (limiter) tidak didukung VyOS.") }}
+{% endif %}
+{% if a.rate_kbps %}
+{% set c = q ~ " class " ~ loop.index * 10 %}
+{{ c }} description '{{ a.cls }}'
+{% for dv in a["class"].dscp %}
+{{ c }} match {{ a.cls }}-D{{ dv }} ip dscp '{{ dv }}'
+{% endfor %}
+{% if a["class"].acl_obj and not a["class"].dscp %}
+{% for r in a["class"].acl_obj.split %}
+{% set m = c ~ " match " ~ a.cls ~ "-" ~ r.seq %}
+{% if not r.ip %}
+{{ m }} ip protocol '{{ r.proto_name }}'
+{% endif %}
+{% if not r.src_any %}
+{{ m }} ip source address '{{ r.src }}'
+{% endif %}
+{% if not r.dst_any %}
+{{ m }} ip destination address '{{ r.dst }}'
+{% endif %}
+{% if r.src_op %}
+{{ m }} ip source port '{{ r.src_port_text }}'
+{% endif %}
+{% if r.dst_op %}
+{{ m }} ip destination port '{{ r.dst_port_text }}'
+{% endif %}
+{% endfor %}
+{% endif %}
+{{ c }} bandwidth '{{ a.rate_kbps }}kbit'
+{% endif %}
+{% endfor %}
+{% endif %}
+{% endfor %}
+{% for b in qos_bindings %}
+set qos interface {{ b.interface }} {{ "ingress" if b.direction == "in" else "egress" }} '{{ b.policy }}{{ "-IN" if b.direction == "in" and (qos_bindings | selectattr("policy", "equalto", b.policy) | selectattr("direction", "equalto", "out") | list) }}'
+{% endfor %}

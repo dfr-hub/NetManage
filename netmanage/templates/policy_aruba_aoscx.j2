@@ -1,0 +1,86 @@
+{% for p in prefix_lists %}
+{% for e in p.entries %}
+ip prefix-list {{ p.name }} seq {{ e.seq }} {{ e.action }} {{ e.prefix }}{{ e.ios }}
+{% endfor %}
+{% endfor %}
+{% for c in community_lists %}
+{% for e in c.entries %}
+ip community-list standard {{ c.name }} seq {{ e.index }} {{ e.action }} {{ e.value }}
+{% endfor %}
+{% endfor %}
+{% for r in route_maps %}
+{% for e in r.entries %}
+route-map {{ r.name }} {{ e.action }} seq {{ e.seq }}
+{% if e.match_prefix %}
+{% if e.match_prefix | length > 1 %}
+{{ warn("route-map " ~ r.name ~ " " ~ e.seq ~ ": AOS-CX hanya menerima satu prefix-list per entry, dipakai " ~ e.match_prefix[0] ~ ".") }}
+{% endif %}
+    match ip address prefix-list {{ e.match_prefix[0] }}
+{% endif %}
+{% if e.match_community %}
+    match community-list {{ e.match_community[0] }}
+{% endif %}
+{% if e.match_tag is not none %}
+    match tag {{ e.match_tag }}
+{% endif %}
+{% if e.set_local_pref is not none %}
+    set local-preference {{ e.set_local_pref }}
+{% endif %}
+{% if e.set_med is not none %}
+    set metric {{ e.set_med }}
+{% endif %}
+{% if e.set_community %}
+    set community {{ e.set_community | join(" ") }}{{ " additive" if e.community_additive }}
+{% endif %}
+{% if e.set_next_hop %}
+    set ip next-hop {{ e.set_next_hop }}
+{% endif %}
+{% if e.set_prepend %}
+    set as-path prepend {{ e.set_prepend | join(" ") }}
+{% endif %}
+{% if e.set_weight is not none %}
+    set weight {{ e.set_weight }}
+{% endif %}
+{% if e.set_tag is not none %}
+    set tag {{ e.set_tag }}
+{% endif %}
+{% endfor %}
+{% endfor %}
+{% for a in acls if not a.qos_only %}
+access-list ip {{ a.name }}
+{% for e in a.split %}
+{% if e.note %}
+    {{ e.seq - 1 }} comment {{ e.note }}
+{% endif %}
+{% if e.established %}
+{{ warn("ACL " ~ a.name ~ " " ~ e.seq ~ ": opsi established tidak dikonversi ke AOS-CX.") }}
+{% endif %}
+    {{ e.seq }} {{ e.action }} {{ "any" if e.standard else e.proto_name }} {{ e.src | aruba_addr }}{{ ios_ports(e.src_op, e.src_ports) }} {{ "any" if e.standard else (e.dst | aruba_addr) }}{{ ios_ports(e.dst_op, e.dst_ports) }}{{ " log" if e.log }}
+{% endfor %}
+{% endfor %}
+{% for c in qos_classes.values() %}
+class ip {{ c.name }}
+{% if c.dscp %}
+{% for d in c.dscp %}
+    {{ loop.index * 10 }} match any any any dscp {{ d }}
+{% endfor %}
+{% elif c.acl_obj %}
+{% for e in c.acl_obj.split %}
+    {{ loop.index * 10 }} match {{ e.proto_name }} {{ e.src | aruba_addr }}{{ ios_ports(e.src_op, e.src_ports) }} {{ e.dst | aruba_addr }}{{ ios_ports(e.dst_op, e.dst_ports) }}
+{% endfor %}
+{% else %}
+    10 match any any any
+{% endif %}
+{% endfor %}
+{% for p in qos_policies %}
+policy {{ p.name }}
+{% for a in p.classes %}
+    {{ a.index }} class ip {{ a.cls }}{{ " action dscp " ~ a.set_dscp if a.set_dscp is not none }}{{ " action local-priority 7" if a.priority }}{{ (" action cir kbps " ~ a.police_kbps ~ " cbs " ~ a.burst_kb * 1024 ~ " exceed drop") if a.police_kbps }}
+{% if a.bandwidth_kbps or a.bandwidth_pct or a.shape_kbps %}
+{{ warn("QoS " ~ p.name ~ " class " ~ a.cls ~ ": bandwidth/shape di AOS-CX diatur lewat schedule-profile, buat manual.") }}
+{% endif %}
+{% endfor %}
+{% if p.default %}
+{{ warn("QoS " ~ p.name ~ ": aksi class-default tidak dikonversi ke AOS-CX.") }}
+{% endif %}
+{% endfor %}
