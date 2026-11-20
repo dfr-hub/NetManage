@@ -199,6 +199,37 @@ EN: dict[str, str] = {
     "Selesai dengan catatan: {error}": "Done with a note: {error}",
     "Speed test: download {down} Mbps, upload {up} Mbps, ping {ping} ms":
         "Speed test: download {down} Mbps, upload {up} Mbps, ping {ping} ms",
+    "Internet": "Internet",
+    "Cloudflare (otomatis terdekat)": "Cloudflare (nearest, automatic)",
+    "Speedtest.net (Ookla)": "Speedtest.net (Ookla)",
+    "LibreSpeed": "LibreSpeed",
+    "Mirror file (download saja)": "File mirror (download only)",
+    "Kustom (URL sendiri)": "Custom (your own URL)",
+    "Provider": "Provider",
+    "Server": "Server",
+    "URL download": "Download URL",
+    "URL upload (opsional)": "Upload URL (optional)",
+    "Memuat daftar server...": "Loading server list...",
+    "Muat server": "Load servers",
+    "kota/ISP:": "city/ISP:",
+    "Pilih server dulu (klik Muat server).": "Choose a server first (click Load servers).",
+    "Data yang dikirim hanya byte acak.": "Only random bytes are sent.",
+    "(klik Muat server)": "(click Load servers)",
+    "tidak ada server yang cocok": "no matching servers",
+    "{count} server dimuat.": "{count} servers loaded.",
+    "Gagal memuat daftar server (butuh internet):\n{error}": "Could not load the server list (needs internet):\n{error}",
+    "Butuh internet. Server Cloudflare terdekat dipilih otomatis. Download dan upload.":
+        "Needs internet. The nearest Cloudflare server is chosen automatically. Download and upload.",
+    "Butuh internet. Server Speedtest.net (Ookla) terdekat, atau cari per kota/ISP (contoh: Jakarta, Surabaya, Telkom, Biznet). Download dan upload; sebagian server menolak upload, coba server lain jika terjadi.":
+        "Needs internet. Nearest Speedtest.net (Ookla) servers, or search by city/ISP (e.g. Jakarta, Surabaya, "
+        "Telkom, Biznet). Download and upload; some servers refuse uploads, try another server if that happens.",
+    "Butuh internet. Server LibreSpeed publik (open source). Download dan upload.":
+        "Needs internet. Public LibreSpeed servers (open source). Download and upload.",
+    "Butuh internet. File 100 MB di data center publik. Hanya mengukur download.":
+        "Needs internet. A 100 MB file in a public data center. Measures download only.",
+    "URL download: file besar di server Anda (HTTP/HTTPS). URL upload opsional, server harus menerima POST (contoh: empty.php LibreSpeed).":
+        "Download URL: a large file on your server (HTTP/HTTPS). Upload URL is optional; the server must accept "
+        "POST (e.g. LibreSpeed empty.php).",
     # ---------------------------------------------------------- conversion report
     "Sumber : {src}  (parser: {engine})": "Source : {src}  (parser: {engine})",
     "Tujuan : {dst}": "Target : {dst}",

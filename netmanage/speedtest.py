@@ -106,6 +106,114 @@ def _stopped(deadline: float, stop) -> bool:
 
 
 # ------------------------------------------------------------------ HTTP (Internet)
+_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) NetManage-SpeedTest"
+
+
+@dataclass
+class Endpoint:
+    """One internet speed-test target.
+
+    down: URL fetched repeatedly for download. up: URL for upload (POST), empty = download only.
+    ping: small URL for latency (empty = 1-byte range request on the download URL).
+    form: upload body sent as 'content1=...' form data (legacy Speedtest.net servers)."""
+    provider: str
+    name: str
+    down: str
+    up: str = ""
+    ping: str = ""
+    form: bool = False
+    location: str = ""
+
+    @property
+    def label(self) -> str:
+        return f"{self.name} ({self.location})" if self.location else self.name
+
+
+CLOUDFLARE_EP = Endpoint("cloudflare", "Cloudflare", f"https://{CLOUDFLARE}/__down?bytes=25000000",
+                         f"https://{CLOUDFLARE}/__up", f"https://{CLOUDFLARE}/__down?bytes=0",
+                         location="auto")
+
+# download-only public test files (checked reachable; 100 MB each)
+MIRRORS = [
+    Endpoint("mirror", "Vultr", "https://sgp-ping.vultr.com/vultr.com.100MB.bin", location="Singapore"),
+    Endpoint("mirror", "Hetzner", "https://sin-speed.hetzner.com/100MB.bin", location="Singapore"),
+    Endpoint("mirror", "Vultr", "https://hnd-jp-ping.vultr.com/vultr.com.100MB.bin", location="Tokyo"),
+    Endpoint("mirror", "Vultr", "https://syd-au-ping.vultr.com/vultr.com.100MB.bin", location="Sydney"),
+    Endpoint("mirror", "Vultr", "https://fra-de-ping.vultr.com/vultr.com.100MB.bin", location="Frankfurt"),
+    Endpoint("mirror", "Hetzner", "https://nbg1-speed.hetzner.com/100MB.bin", location="Nuremberg"),
+    Endpoint("mirror", "OVH", "https://proof.ovh.net/files/100Mb.dat", location="Roubaix, France"),
+    Endpoint("mirror", "Hetzner", "https://ash-speed.hetzner.com/100MB.bin", location="Ashburn, USA"),
+]
+
+OOKLA_API = "https://www.speedtest.net/api/js/servers?engine=js&limit={limit}&https_functional=true"
+LIBRESPEED_LIST = "https://librespeed.org/backend-servers/servers.php"
+
+
+def _get_json(url: str, timeout: float = 10):
+    import json
+    from urllib.request import Request, urlopen
+    with urlopen(Request(url, headers={"User-Agent": _UA}), timeout=timeout,
+                 context=ssl.create_default_context()) as r:
+        return json.loads(r.read(2_000_000).decode("utf-8", errors="replace"))
+
+
+def ookla_servers(search: str = "", limit: int = 30) -> list[Endpoint]:
+    """Speedtest.net servers: nearest to this connection, or matching a city / ISP name."""
+    from urllib.parse import quote
+    url = OOKLA_API.format(limit=limit) + (f"&search={quote(search.strip())}" if search.strip() else "")
+    out = []
+    for s in _get_json(url):
+        up = s.get("url", "")
+        if not up.endswith("upload.php"):
+            continue
+        base = up[: -len("upload.php")]
+        dist = s.get("distance")
+        where = ", ".join(x for x in (s.get("name", ""), s.get("country", "")) if x)
+        if dist is not None:
+            where += f" - {dist} km"
+        out.append(Endpoint("ookla", s.get("sponsor", "?"), base + "random4000x4000.jpg", up,
+                            base + "latency.txt", form=True, location=where))
+    return out
+
+
+def librespeed_servers() -> list[Endpoint]:
+    """Public LibreSpeed servers (open source speed-test backends)."""
+    out = []
+    for s in _get_json(LIBRESPEED_LIST):
+        server = s.get("server", "")
+        if not server:
+            continue
+        if server.startswith("//"):
+            server = "https:" + server
+        base = server if server.endswith("/") else server + "/"
+        name = s.get("name", server)
+        place, _, host = name.partition(" (")
+        out.append(Endpoint("librespeed", host.rstrip(")") or name,
+                            base + s.get("dlURL", "garbage.php") + "?ckSize=100",
+                            base + s.get("ulURL", "empty.php"), base + s.get("pingURL", "empty.php"),
+                            location=place))
+    return sorted(out, key=lambda e: e.location)
+
+
+def custom_endpoint(down: str, up: str = "") -> Endpoint:
+    def norm(u):
+        u = u.strip()
+        return u if not u or "://" in u else "http://" + u
+    return Endpoint("custom", norm(down), norm(down), norm(up))
+
+
+class _Url:
+    def __init__(self, url: str):
+        u = urlsplit(url)
+        self.https = u.scheme == "https"
+        self.host = u.hostname or ""
+        self.port = u.port
+        self.path = (u.path or "/") + (f"?{u.query}" if u.query else "")
+
+    def conn(self, timeout: float = 15):
+        return _conn(self.host, self.port, self.https, timeout)
+
+
 def _conn(host: str, port: int | None, https: bool, timeout: float = 10):
     if https:
         return http.client.HTTPSConnection(host, port or 443, timeout=timeout,
@@ -113,104 +221,127 @@ def _conn(host: str, port: int | None, https: bool, timeout: float = 10):
     return http.client.HTTPConnection(host, port or 80, timeout=timeout)
 
 
-def http_test(url: str = "", duration: float = 10, streams: int = 4, do_upload: bool = True,
-              on_progress: Progress = _noop, stop: threading.Event | None = None) -> SpeedResult:
-    """Cloudflare speed test when url is empty, otherwise download from a custom URL.
+def _bust(path: str) -> str:
+    """Cache-busting query parameter so proxies cannot answer from cache."""
+    return path + ("&" if "?" in path else "?") + f"nm={time.time_ns()}"
 
-    A custom URL measures download, and upload only when the server accepts POST."""
-    cloudflare = not url
-    if cloudflare:
-        host, port, https = CLOUDFLARE, None, True
-        down_path, up_path, ping_path = "/__down?bytes=25000000", "/__up", "/__down?bytes=0"
-    else:
-        u = urlsplit(url if "://" in url else f"http://{url}")
-        host, port, https = u.hostname or "", u.port, u.scheme == "https"
-        down_path = (u.path or "/") + (f"?{u.query}" if u.query else "")
-        up_path = ping_path = down_path
-    res = SpeedResult(mode="Internet (Cloudflare)" if cloudflare else "HTTP URL",
-                      server=CLOUDFLARE if cloudflare else url)
+
+def internet_test(ep: Endpoint, duration: float = 10, streams: int = 4, do_upload: bool = True,
+                  on_progress: Progress = _noop, stop: threading.Event | None = None) -> SpeedResult:
+    names = {"cloudflare": "Internet (Cloudflare)", "ookla": "Internet (Speedtest.net)",
+             "librespeed": "Internet (LibreSpeed)", "mirror": "Internet (mirror)", "custom": "HTTP URL"}
+    res = SpeedResult(mode=names.get(ep.provider, "Internet"), server=ep.label)
+    headers = {"User-Agent": _UA}
     try:
+        down = _Url(ep.down)
         # latency: request time on a kept-alive connection (first one includes TCP/TLS setup)
+        ping = _Url(ep.ping) if ep.ping else down
+        ping_headers = headers if ep.ping else {**headers, "Range": "bytes=0-0"}
         samples = []
-        c = _conn(host, port, https)
+        c = ping.conn(10)
         for i in range(8):
             if stop is not None and stop.is_set():
                 break
             t0 = time.perf_counter()
-            c.request("GET", ping_path, headers={} if cloudflare else {"Range": "bytes=0-0"})
+            c.request("GET", _bust(ping.path) if ep.provider != "mirror" else ping.path, headers=ping_headers)
             r = c.getresponse()
             r.read()
+            if r.status >= 400:
+                raise RuntimeError(f"HTTP {r.status} dari {ping.host}")
             if i:
                 samples.append((time.perf_counter() - t0) * 1000)
+            if r.will_close:
+                c.close()
+                c = ping.conn(10)
         c.close()
         res.ping_ms, res.jitter_ms = _latency(samples)
         on_progress("ping", res.ping_ms or 0, 0)
 
         meter = _Meter("download", on_progress)
 
-        def down(deadline, stop):
-            conn = _conn(host, port, https, 15)
+        def download(deadline, stop):
+            conn = down.conn()
             try:
                 while not _stopped(deadline, stop):
-                    conn.request("GET", down_path)
+                    path = down.path if ep.provider == "mirror" else _bust(down.path)
+                    conn.request("GET", path, headers=headers)
                     resp = conn.getresponse()
                     if resp.status >= 400:
                         raise RuntimeError(f"HTTP {resp.status} dari server")
-                    finished = True
                     while True:
                         if _stopped(deadline, stop):
-                            finished = False
-                            break
+                            return
                         chunk = resp.read(_CHUNK)
                         if not chunk:
                             break
                         meter.add(len(chunk))
-                    if not finished:
-                        break
+                    if resp.will_close:
+                        conn.close()
+                        conn = down.conn()
             finally:
                 conn.close()
 
-        errors = _run_streams(down, streams, duration, stop)
+        errors = _run_streams(download, streams, duration, stop)
         meter.finish()
         res.download_bytes, res.download_mbps = meter.total, meter.mbps()
         if errors and not meter.total:
             raise RuntimeError(errors[0])
 
-        if do_upload and not (stop and stop.is_set()):
+        if do_upload and ep.up and not (stop and stop.is_set()):
+            up = _Url(ep.up)
             meter = _Meter("upload", on_progress)
-            size = 8 * 1024 * 1024
+            size = 8 * 1024 * 1024 if ep.provider == "cloudflare" else 4 * 1024 * 1024
+            prefix = b"content1=" if ep.form else b""
+            body_type = "application/x-www-form-urlencoded" if ep.form else "application/octet-stream"
+            filler = (b"A" * _CHUNK) if ep.form else _PAYLOAD
 
-            def up(deadline, stop):
-                conn = _conn(host, port, https, 15)
+            def upload(deadline, stop):
+                conn = up.conn()
                 try:
                     while not _stopped(deadline, stop):
-                        conn.putrequest("POST", up_path)
-                        conn.putheader("Content-Type", "application/octet-stream")
-                        conn.putheader("Content-Length", str(size))
+                        conn.putrequest("POST", _bust(up.path))
+                        conn.putheader("User-Agent", _UA)
+                        conn.putheader("Content-Type", body_type)
+                        conn.putheader("Content-Length", str(len(prefix) + size))
                         conn.endheaders()
+                        if prefix:
+                            conn.send(prefix)
                         sent = 0
                         while sent < size and not _stopped(deadline, stop):
-                            conn.send(_PAYLOAD)
-                            sent += len(_PAYLOAD)
-                            meter.add(len(_PAYLOAD))
+                            part = filler[: min(len(filler), size - sent)]
+                            conn.send(part)
+                            sent += len(part)
+                            meter.add(len(part))
                         if sent < size:
                             break
                         resp = conn.getresponse()
                         resp.read()
                         if resp.status >= 400:
                             raise RuntimeError(f"HTTP {resp.status}")
+                        if resp.will_close:
+                            conn.close()
+                            conn = up.conn()
                 finally:
                     conn.close()
 
-            errors = _run_streams(up, streams, duration, stop)
+            errors = _run_streams(upload, streams, duration, stop)
             meter.finish()
             res.upload_bytes, res.upload_mbps = meter.total, meter.mbps()
-            if errors and not cloudflare:
+            if errors and meter.total < 1_000_000:
                 res.upload_mbps = None
-                res.error = "Upload tidak didukung server URL ini (POST ditolak)."
+                res.error = f"Upload ditolak server ({errors[0][:80]}). Coba server lain."
+        elif do_upload and not ep.up:
+            res.error = "Server ini hanya untuk download (tanpa tes upload)."
     except (OSError, http.client.HTTPException, RuntimeError, ssl.SSLError) as exc:
         res.error = f"{type(exc).__name__}: {exc}"
     return res
+
+
+def http_test(url: str = "", duration: float = 10, streams: int = 4, do_upload: bool = True,
+              on_progress: Progress = _noop, stop: threading.Event | None = None) -> SpeedResult:
+    """Cloudflare when url is empty, otherwise download (and POST upload) against a custom URL."""
+    ep = CLOUDFLARE_EP if not url else custom_endpoint(url, url)
+    return internet_test(ep, duration, streams, do_upload, on_progress, stop)
 
 
 # ------------------------------------------------------------------ LAN server/client

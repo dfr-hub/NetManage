@@ -135,10 +135,21 @@ Export ke SVG, draw.io (bisa diedit di diagrams.net offline), atau CSV daftar li
 
 ## Speed Test
 
+Mode **Internet** punya beberapa pilihan provider dan server:
+
+| Provider | Server | Download | Upload |
+|---|---|---|---|
+| Cloudflare | otomatis terdekat | ya | ya |
+| Speedtest.net (Ookla) | daftar server terdekat, atau cari per kota/ISP (Jakarta, Surabaya, Telkom, Biznet, ...) | ya | ya (sebagian server menolak upload; coba server lain) |
+| LibreSpeed | daftar server publik open source | ya | ya |
+| Mirror file | Vultr / Hetzner (Singapura, Tokyo, Sydney, Frankfurt, ...), OVH | ya | tidak |
+| Kustom | URL file di server Anda; URL upload opsional (harus menerima POST) | ya | opsional |
+
+Daftar server Ookla dan LibreSpeed diambil online saat tombol **Muat server** ditekan.
+
 | Mode | Kebutuhan | Kegunaan |
 |---|---|---|
-| Internet (Cloudflare) | koneksi internet | kecepatan internet ke server speed.cloudflare.com terdekat |
-| URL server sendiri | web server dengan file besar | throughput ke server internal (download; upload jika server menerima POST) |
+| Internet | koneksi internet (atau server internal untuk mode Kustom) | kecepatan internet / throughput ke server pilihan |
 | LAN ke NetManage lain | NetManage di laptop kedua, offline | throughput link antar site/VLAN, mirip iperf |
 
 Untuk mode LAN: di laptop kedua buka tab Speed Test, klik **Jalankan server** (port default 5201,

@@ -405,12 +405,21 @@ class SpeedTab(ttk.Frame):
     def __init__(self, master, status):
         super().__init__(master, padding=10)
         self.status = status
-        self.modes = {_("Internet (Cloudflare)"): "cloudflare", _("URL server sendiri (HTTP)"): "url",
-                      _("LAN ke NetManage lain"): "lan"}
+        self.modes = {_("Internet"): "internet", _("LAN ke NetManage lain"): "lan"}
+        self.providers = {_("Cloudflare (otomatis terdekat)"): "cloudflare",
+                          _("Speedtest.net (Ookla)"): "ookla",
+                          _("LibreSpeed"): "librespeed",
+                          _("Mirror file (download saja)"): "mirror",
+                          _("Kustom (URL sendiri)"): "custom"}
+        self.servers: dict[str, list[speedtest.Endpoint]] = {
+            "cloudflare": [speedtest.CLOUDFLARE_EP], "mirror": list(speedtest.MIRRORS),
+            "ookla": [], "librespeed": []}
         self.events: queue.Queue = queue.Queue()
         self.srv_msgs: queue.Queue = queue.Queue()
+        self.list_msgs: queue.Queue = queue.Queue()
         self.stop_event = threading.Event()
         self.running = False
+        self.loading = False
         self.history: list[speedtest.SpeedResult] = []
         self.server: speedtest.LanServer | None = None
 
@@ -418,37 +427,68 @@ class SpeedTab(ttk.Frame):
         top.pack(fill="x")
         cfg = ttk.LabelFrame(top, text=f" {_('Pengaturan tes')} ", padding=10)
         cfg.pack(side="left", fill="both", expand=True)
+        cfg.columnconfigure(1, weight=1)
         self.mode = tk.StringVar(value=next(iter(self.modes)))
-        for i, label in enumerate(self.modes):
-            ttk.Radiobutton(cfg, text=label, value=label, variable=self.mode,
-                            command=self._mode_changed).grid(row=0, column=i, sticky="w", padx=(0, 14))
+        radios = ttk.Frame(cfg)
+        radios.grid(row=0, column=0, columnspan=3, sticky="w")
+        for label in self.modes:
+            ttk.Radiobutton(radios, text=label, value=label, variable=self.mode,
+                            command=self._mode_changed).pack(side="left", padx=(0, 18))
+
+        self.provider = tk.StringVar(value=next(iter(self.providers)))
+        self.server_var = tk.StringVar()
+        self.search = tk.StringVar()
         self.url = tk.StringVar(value="http://")
+        self.up_url = tk.StringVar()
         self.lan_host = tk.StringVar()
         self.lan_port = tk.IntVar(value=speedtest.LAN_PORT)
         self.duration = tk.IntVar(value=10)
         self.streams = tk.IntVar(value=4)
         self.upload = tk.BooleanVar(value=True)
-        ttk.Label(cfg, text=_("URL file")).grid(row=1, column=0, sticky="w", pady=(10, 3))
-        self.url_entry = ttk.Entry(cfg, textvariable=self.url, width=60)
-        self.url_entry.grid(row=1, column=1, columnspan=2, sticky="we", pady=(10, 3))
-        ttk.Label(cfg, text=_("Server LAN (IP)")).grid(row=2, column=0, sticky="w", pady=3)
+
+        self.rows: dict[str, list[tk.Widget]] = {}
+
+        def row(key, r, label, widget):
+            lab = ttk.Label(cfg, text=label)
+            lab.grid(row=r, column=0, sticky="w", pady=3, padx=(0, 10))
+            widget.grid(row=r, column=1, columnspan=2, sticky="we", pady=3)
+            self.rows[key] = [lab, widget]
+
+        self.provider_box = ttk.Combobox(cfg, textvariable=self.provider, state="readonly",
+                                         values=list(self.providers), width=34)
+        self.provider_box.bind("<<ComboboxSelected>>", lambda _e: self._provider_changed())
+        row("provider", 1, _("Provider"), self.provider_box)
+        sv = ttk.Frame(cfg)
+        self.server_box = ttk.Combobox(sv, textvariable=self.server_var, state="readonly", width=58)
+        self.server_box.pack(side="left", fill="x", expand=True)
+        self.search_entry = ttk.Entry(sv, textvariable=self.search, width=16)
+        self.search_entry.bind("<Return>", lambda _e: self.load_servers())
+        self.load_btn = ttk.Button(sv, text=_("Muat server"), command=self.load_servers)
+        self.load_btn.pack(side="right", padx=(6, 0))
+        self.search_entry.pack(side="right", padx=(6, 0))
+        self.search_hint = ttk.Label(sv, text=_("kota/ISP:"), style="Muted.TLabel")
+        self.search_hint.pack(side="right", padx=(10, 0))
+        row("server", 2, _("Server"), sv)
+        row("down", 3, _("URL download"), ttk.Entry(cfg, textvariable=self.url))
+        row("up", 4, _("URL upload (opsional)"), ttk.Entry(cfg, textvariable=self.up_url))
         lan = ttk.Frame(cfg)
-        lan.grid(row=2, column=1, columnspan=2, sticky="w")
         self.lan_entry = ttk.Entry(lan, textvariable=self.lan_host, width=22)
         self.lan_entry.pack(side="left")
         ttk.Label(lan, text=_("Port")).pack(side="left", padx=(10, 6))
         _spin(lan, self.lan_port, 1, 65535, 7).pack(side="left")
+        row("lan", 5, _("Server LAN (IP)"), lan)
+
         opt = ttk.Frame(cfg)
-        opt.grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        opt.grid(row=6, column=0, columnspan=3, sticky="w", pady=(8, 0))
         ttk.Label(opt, text=_("Durasi per arah (detik)")).pack(side="left")
         _spin(opt, self.duration, 3, 60, 5).pack(side="left", padx=(6, 14))
         ttk.Label(opt, text=_("Stream paralel")).pack(side="left")
         _spin(opt, self.streams, 1, 16, 4).pack(side="left", padx=(6, 14))
         ttk.Checkbutton(opt, text=_("Tes upload"), variable=self.upload).pack(side="left")
-        self.note = ttk.Label(cfg, style="Muted.TLabel", wraplength=680, justify="left")
-        self.note.grid(row=4, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        self.note = ttk.Label(cfg, style="Muted.TLabel", wraplength=720, justify="left")
+        self.note.grid(row=7, column=0, columnspan=3, sticky="w", pady=(8, 0))
         btns = ttk.Frame(cfg)
-        btns.grid(row=5, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        btns.grid(row=8, column=0, columnspan=3, sticky="w", pady=(10, 0))
         self.start_btn = ttk.Button(btns, text=_("Mulai speed test"), command=self.start)
         self.start_btn.pack(side="left")
         self.stop_btn = ttk.Button(btns, text=_("Stop"), command=self.stop_event.set, state="disabled")
@@ -457,10 +497,10 @@ class SpeedTab(ttk.Frame):
         srv = ttk.LabelFrame(top, text=f" {_('Mode server LAN (laptop ini)')} ", padding=10)
         srv.pack(side="left", fill="y", padx=(10, 0))
         self.srv_port = tk.IntVar(value=speedtest.LAN_PORT)
-        row = ttk.Frame(srv)
-        row.pack(anchor="w")
-        ttk.Label(row, text=_("Port")).pack(side="left")
-        _spin(row, self.srv_port, 1, 65535, 7).pack(side="left", padx=6)
+        prow = ttk.Frame(srv)
+        prow.pack(anchor="w")
+        ttk.Label(prow, text=_("Port")).pack(side="left")
+        _spin(prow, self.srv_port, 1, 65535, 7).pack(side="left", padx=6)
         self.srv_btn = ttk.Button(srv, text=_("Jalankan server"), command=self.toggle_server)
         self.srv_btn.pack(anchor="w", pady=(8, 6))
         ips = ", ".join(speedtest.local_ips()) or "-"
@@ -501,9 +541,9 @@ class SpeedTab(ttk.Frame):
         hb = ttk.Frame(hist)
         hb.pack(fill="x", pady=(0, 6))
         ttk.Button(hb, text=_("Export CSV..."), command=self.export).pack(side="left")
-        cols = (("when", _("Waktu"), 140), ("mode", _("Mode"), 160), ("server", "Server", 220),
+        cols = (("when", _("Waktu"), 140), ("mode", _("Mode"), 170), ("server", "Server", 300),
                 ("ping", "Ping ms", 70), ("jitter", "Jitter ms", 70), ("down", "Download Mbps", 110),
-                ("up", "Upload Mbps", 100), ("err", _("Keterangan"), 280))
+                ("up", "Upload Mbps", 100), ("err", _("Keterangan"), 260))
         self.tree = ttk.Treeview(hist, columns=[c[0] for c in cols], show="headings", height=4)
         for key, label, width in cols:
             self.tree.heading(key, text=label)
@@ -518,18 +558,29 @@ class SpeedTab(ttk.Frame):
             self._srv_job = None
         super().destroy()
 
+    # --------------------------------------------------------------- state
     def get_state(self) -> dict:
-        return {"history": list(self.history), "url": self.url.get(), "lan_host": self.lan_host.get(),
-                "mode": self.modes[self.mode.get()]}
+        return {"history": list(self.history), "url": self.url.get(), "up_url": self.up_url.get(),
+                "lan_host": self.lan_host.get(), "mode": self.modes[self.mode.get()],
+                "provider": self.providers[self.provider.get()], "server": self.server_box.current(),
+                "search": self.search.get(), "lists": {k: list(v) for k, v in self.servers.items()}}
 
     def set_state(self, st: dict) -> None:
         self.url.set(st.get("url", "http://"))
+        self.up_url.set(st.get("up_url", ""))
         self.lan_host.set(st.get("lan_host", ""))
-        mode = st.get("mode")
+        self.search.set(st.get("search", ""))
+        self.servers.update(st.get("lists", {}))
         for label, key in self.modes.items():
-            if key == mode:
+            if key == st.get("mode"):
                 self.mode.set(label)
-        self._mode_changed()
+        for label, key in self.providers.items():
+            if key == st.get("provider"):
+                self.provider.set(label)
+        self._mode_changed(autoload=False)
+        idx = st.get("server", 0)
+        if isinstance(idx, int) and 0 <= idx < len(self.server_box["values"]):
+            self.server_box.current(idx)
         for r in reversed(st.get("history", [])):
             self._add_history(r)
 
@@ -539,20 +590,113 @@ class SpeedTab(ttk.Frame):
                 self.srv_log.configure(text=self.srv_msgs.get_nowait())
         except queue.Empty:
             pass
+        try:
+            while True:
+                kind, provider, data = self.list_msgs.get_nowait()
+                self.loading = False
+                self.load_btn.configure(state="normal")
+                if kind == "ok":
+                    self.servers[provider] = data
+                    if self.providers[self.provider.get()] == provider:
+                        self._fill_servers()
+                    self.status(_("{count} server dimuat.").format(count=len(data)))
+                else:
+                    messagebox.showerror(APP_NAME, _("Gagal memuat daftar server (butuh internet):\n{error}")
+                                         .format(error=data))
+        except queue.Empty:
+            pass
         self._srv_job = self.after(500, self._srv_poll)
 
-    def _mode_changed(self):
-        mode = self.modes[self.mode.get()]
-        self.url_entry.configure(state="normal" if mode == "url" else "disabled")
-        self.lan_entry.configure(state="normal" if mode == "lan" else "disabled")
+    # ---------------------------------------------------------------- layout
+    def _show(self, key: str, visible: bool) -> None:
+        for w in self.rows[key]:
+            if visible:
+                w.grid()
+            else:
+                w.grid_remove()
+
+    def _mode_changed(self, autoload: bool = True):
+        internet = self.modes[self.mode.get()] == "internet"
+        self._show("provider", internet)
+        self._show("lan", not internet)
+        if internet:
+            self._provider_changed(autoload)
+        else:
+            for key in ("server", "down", "up"):
+                self._show(key, False)
+            self.note.configure(text=_("Offline. Jalankan 'Mode server LAN' di NetManage laptop lain, lalu isi "
+                                       "IP laptop itu. Cocok untuk mengukur throughput link antar site/VLAN."))
+
+    def _provider_changed(self, autoload: bool = True):
+        p = self.providers[self.provider.get()]
+        custom = p == "custom"
+        self._show("server", not custom)
+        self._show("down", custom)
+        self._show("up", custom)
+        for w in (self.load_btn, self.search_entry, self.search_hint):
+            w.pack_forget()
+        if p in ("ookla", "librespeed"):  # side=right: first packed sits rightmost
+            self.load_btn.pack(side="right", padx=(6, 0))
+        if p == "ookla":
+            self.search_entry.pack(side="right", padx=(6, 0))
+            self.search_hint.pack(side="right", padx=(10, 0))
+        self._fill_servers()
+        if autoload and p in ("ookla", "librespeed") and not self.servers[p]:
+            self.load_servers()
         self.note.configure(text={
-            "cloudflare": _("Butuh koneksi internet. Mengukur ke server speed.cloudflare.com terdekat. "
-                            "Data yang dikirim hanya byte acak."),
-            "url": _("Download berulang dari URL (misalnya file besar di web server internal). Upload hanya "
-                     "jalan jika server menerima POST."),
-            "lan": _("Offline. Jalankan 'Mode server LAN' di NetManage laptop lain, lalu isi IP laptop itu. "
-                     "Cocok untuk mengukur throughput link antar site/VLAN."),
-        }[mode])
+            "cloudflare": _("Butuh internet. Server Cloudflare terdekat dipilih otomatis. Download dan upload."),
+            "ookla": _("Butuh internet. Server Speedtest.net (Ookla) terdekat, atau cari per kota/ISP "
+                       "(contoh: Jakarta, Surabaya, Telkom, Biznet). Download dan upload; sebagian server "
+                       "menolak upload, coba server lain jika terjadi."),
+            "librespeed": _("Butuh internet. Server LibreSpeed publik (open source). Download dan upload."),
+            "mirror": _("Butuh internet. File 100 MB di data center publik. Hanya mengukur download."),
+            "custom": _("URL download: file besar di server Anda (HTTP/HTTPS). URL upload opsional, server harus "
+                        "menerima POST (contoh: empty.php LibreSpeed)."),
+        }[p] + " " + _("Data yang dikirim hanya byte acak."))
+
+    def _fill_servers(self):
+        p = self.providers[self.provider.get()]
+        items = self.servers.get(p, [])
+        self.server_box.configure(values=[e.label for e in items])
+        if items:
+            self.server_box.current(0)
+        else:
+            self.server_var.set(_("(klik Muat server)") if p in ("ookla", "librespeed") else "")
+
+    def load_servers(self):
+        p = self.providers[self.provider.get()]
+        if self.loading or p not in ("ookla", "librespeed"):
+            return
+        self.loading = True
+        self.load_btn.configure(state="disabled")
+        self.server_var.set(_("Memuat daftar server..."))
+        search = self.search.get()
+
+        def work():
+            try:
+                data = speedtest.ookla_servers(search) if p == "ookla" else speedtest.librespeed_servers()
+                if not data:
+                    raise ValueError(_("tidak ada server yang cocok"))
+                self.list_msgs.put(("ok", p, data))
+            except Exception as exc:  # noqa: BLE001 - network errors shown to the user
+                self.list_msgs.put(("err", p, f"{type(exc).__name__}: {exc}"))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _endpoint(self) -> speedtest.Endpoint | None:
+        p = self.providers[self.provider.get()]
+        if p == "custom":
+            url = self.url.get().strip()
+            if url in ("", "http://", "https://"):
+                messagebox.showinfo(APP_NAME, _("Isi URL file untuk diunduh."))
+                return None
+            return speedtest.custom_endpoint(url, self.up_url.get())
+        items = self.servers.get(p, [])
+        idx = self.server_box.current()
+        if not items or idx < 0:
+            messagebox.showinfo(APP_NAME, _("Pilih server dulu (klik Muat server)."))
+            return None
+        return items[idx]
 
     # -------------------------------------------------------------- server
     def toggle_server(self):
@@ -579,14 +723,15 @@ class SpeedTab(ttk.Frame):
         if self.running:
             return
         mode = self.modes[self.mode.get()]
-        url = self.url.get().strip()
         host = self.lan_host.get().strip()
-        if mode == "url" and url in ("", "http://", "https://"):
-            messagebox.showinfo(APP_NAME, _("Isi URL file untuk diunduh."))
-            return
+        endpoint = None
         if mode == "lan" and not host:
             messagebox.showinfo(APP_NAME, _("Isi IP laptop yang menjalankan server LAN NetManage."))
             return
+        if mode == "internet":
+            endpoint = self._endpoint()
+            if endpoint is None:
+                return
         duration = _int(self.duration, 10, 3, 60)
         streams = _int(self.streams, 4, 1, 16)
         port = _int(self.lan_port, speedtest.LAN_PORT, 1, 65535)  # Tk variables: read on the UI thread only
@@ -611,8 +756,7 @@ class SpeedTab(ttk.Frame):
                 if not upload:
                     r.upload_mbps = None
             else:
-                r = speedtest.http_test("" if mode == "cloudflare" else url, duration, streams, upload,
-                                        progress, self.stop_event)
+                r = speedtest.internet_test(endpoint, duration, streams, upload, progress, self.stop_event)
             self.events.put(("done", r))
 
         threading.Thread(target=work, daemon=True).start()
