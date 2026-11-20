@@ -57,6 +57,48 @@ def main() -> int:
     bad = speedtest.lan_test("127.0.0.1", 5297, duration=2)
     check("server mati -> pesan error", bool(bad.error))
 
+    # internet_test against a local HTTP server: download, form upload, redirect
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    seen = {"form": False}
+
+    class H(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            if self.path.startswith("/redir"):
+                self.send_response(307)
+                self.send_header("Location", "/file")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            body = b"x" * (2_000_000 if self.path.startswith("/file") else 10)
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            data = self.rfile.read(int(self.headers["Content-Length"]))
+            seen["form"] |= data.startswith(b"content1=")
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    ok = speedtest.internet_test(speedtest.Endpoint("ookla", "lokal", f"{base}/file", f"{base}/up", f"{base}/ping",
+                                                    form=True), duration=2, streams=2)
+    check("internet_test download+upload form", not ok.error and ok.download_mbps > 1 and ok.upload_mbps > 1
+          and seen["form"])
+    red = speedtest.internet_test(speedtest.custom_endpoint(f"{base}/redir"), duration=2, streams=1)
+    check("redirect -> error, bukan hasil palsu", "307" in red.error and "/file" in red.error)
+    httpd.shutdown()
+
     import tkinter as tk
     from netmanage import gui, gui_tools
     root = gui.TkinterDnD.Tk() if gui.HAS_DND else tk.Tk()

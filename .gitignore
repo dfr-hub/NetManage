@@ -20,3 +20,7 @@ commands.json
 .idea/
 Thumbs.db
 desktop.ini
+
+# crash dumps from Git Bash
+*.stackdump
+dist_rel/

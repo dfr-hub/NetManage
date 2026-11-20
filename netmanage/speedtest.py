@@ -221,6 +221,35 @@ def _conn(host: str, port: int | None, https: bool, timeout: float = 10):
     return http.client.HTTPConnection(host, port or 80, timeout=timeout)
 
 
+def _check(resp) -> None:
+    """Anything but 2xx is a failure: a redirect body is not test data."""
+    if resp.status >= 300:
+        where = resp.getheader("Location") if 300 <= resp.status < 400 else ""
+        raise RuntimeError(f"HTTP {resp.status}" + (f" (redirect ke {where}, pakai URL itu)" if where else ""))
+
+
+def _follow_redirect(ep: Endpoint) -> Endpoint:
+    """Some Speedtest.net servers move http:// to another https:// host; rebase every URL once."""
+    from dataclasses import replace
+    from urllib.parse import urlsplit, urlunsplit
+    probe = _Url(ep.ping or ep.down)
+    c = probe.conn(10)
+    try:
+        c.request("GET", probe.path, headers={"User-Agent": _UA, "Range": "bytes=0-0"})
+        r = c.getresponse()
+        r.read()
+        target = r.getheader("Location", "") if r.status in (301, 302, 307, 308) else ""
+    finally:
+        c.close()
+    new = urlsplit(target)
+    if not new.netloc:
+        return ep
+
+    def move(url):
+        return urlunsplit(urlsplit(url)._replace(scheme=new.scheme, netloc=new.netloc)) if url else url
+    return replace(ep, down=move(ep.down), up=move(ep.up), ping=move(ep.ping))
+
+
 def _bust(path: str) -> str:
     """Cache-busting query parameter so proxies cannot answer from cache."""
     return path + ("&" if "?" in path else "?") + f"nm={time.time_ns()}"
@@ -233,6 +262,7 @@ def internet_test(ep: Endpoint, duration: float = 10, streams: int = 4, do_uploa
     res = SpeedResult(mode=names.get(ep.provider, "Internet"), server=ep.label)
     headers = {"User-Agent": _UA}
     try:
+        ep = _follow_redirect(ep)
         down = _Url(ep.down)
         # latency: request time on a kept-alive connection (first one includes TCP/TLS setup)
         ping = _Url(ep.ping) if ep.ping else down
@@ -246,8 +276,7 @@ def internet_test(ep: Endpoint, duration: float = 10, streams: int = 4, do_uploa
             c.request("GET", _bust(ping.path) if ep.provider != "mirror" else ping.path, headers=ping_headers)
             r = c.getresponse()
             r.read()
-            if r.status >= 400:
-                raise RuntimeError(f"HTTP {r.status} dari {ping.host}")
+            _check(r)
             if i:
                 samples.append((time.perf_counter() - t0) * 1000)
             if r.will_close:
@@ -266,8 +295,7 @@ def internet_test(ep: Endpoint, duration: float = 10, streams: int = 4, do_uploa
                     path = down.path if ep.provider == "mirror" else _bust(down.path)
                     conn.request("GET", path, headers=headers)
                     resp = conn.getresponse()
-                    if resp.status >= 400:
-                        raise RuntimeError(f"HTTP {resp.status} dari server")
+                    _check(resp)
                     while True:
                         if _stopped(deadline, stop):
                             return
@@ -286,6 +314,8 @@ def internet_test(ep: Endpoint, duration: float = 10, streams: int = 4, do_uploa
         res.download_bytes, res.download_mbps = meter.total, meter.mbps()
         if errors and not meter.total:
             raise RuntimeError(errors[0])
+        if errors:
+            res.error = f"Sebagian stream download gagal ({errors[0][:80]}), hasil bisa lebih rendah."
 
         if do_upload and ep.up and not (stop and stop.is_set()):
             up = _Url(ep.up)
@@ -316,8 +346,7 @@ def internet_test(ep: Endpoint, duration: float = 10, streams: int = 4, do_uploa
                             break
                         resp = conn.getresponse()
                         resp.read()
-                        if resp.status >= 400:
-                            raise RuntimeError(f"HTTP {resp.status}")
+                        _check(resp)
                         if resp.will_close:
                             conn.close()
                             conn = up.conn()
@@ -330,6 +359,8 @@ def internet_test(ep: Endpoint, duration: float = 10, streams: int = 4, do_uploa
             if errors and meter.total < 1_000_000:
                 res.upload_mbps = None
                 res.error = f"Upload ditolak server ({errors[0][:80]}). Coba server lain."
+            elif errors:
+                res.error = f"Sebagian stream upload gagal ({errors[0][:80]}), hasil upload tidak akurat."
         elif do_upload and not ep.up:
             res.error = "Server ini hanya untuk download (tanpa tes upload)."
     except (OSError, http.client.HTTPException, RuntimeError, ssl.SSLError) as exc:
@@ -337,11 +368,6 @@ def internet_test(ep: Endpoint, duration: float = 10, streams: int = 4, do_uploa
     return res
 
 
-def http_test(url: str = "", duration: float = 10, streams: int = 4, do_upload: bool = True,
-              on_progress: Progress = _noop, stop: threading.Event | None = None) -> SpeedResult:
-    """Cloudflare when url is empty, otherwise download (and POST upload) against a custom URL."""
-    ep = CLOUDFLARE_EP if not url else custom_endpoint(url, url)
-    return internet_test(ep, duration, streams, do_upload, on_progress, stop)
 
 
 # ------------------------------------------------------------------ LAN server/client
